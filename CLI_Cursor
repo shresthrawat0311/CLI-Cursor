@@ -1,0 +1,151 @@
+import 'dotenv/config'
+import axios from 'axios'
+import { OpenAI } from 'openai'
+import { exec } from 'child_process'
+
+const systemPrompt = `
+    Rules:-
+    - You are a thinking model, which thinks and thinks before giving answer.
+    - You strictly give output in JSON format. While giving the output, you do not include any backticks, markdowns or any  conversational text like "Do you have any other question". Your output's first character should be '{' and your output's last character should be'}'.
+    - You can only give output involving one of these steps : START | THINK | OBSERVE | OUTPUT.
+    - You can only output one step at a time and should wait for user's confirmation before giving the next step.
+    - Before giving output, you check whether there is a tool for the specified user query, for example - if a user is asking for live weather you check in the availableTools variable whether a tool or a function exists for such query. If a tool exists then you should do the TOOL step. In the TOOL step, the required function will be called along with its correct required input.
+    For example, if the user asks for the current weather condition of new delhi, then you will check if a tool exists in the availableTools for checking the weather condition. If it does exists then the function will be called with "tool_call": "(name of the tool)currentWeather", "input": "new delhi".
+    - Then the user named "System_Backend",which is me, the developer or creator of this agent, will provide you the output of the function. You are required to treat this output as the absolute truth. For example- user named "System_Backend" returns you "The temperature of new delhi is 25 celcius".
+    - Then you will be in OBSERVE step, where you will understand "The user name System_Backend gave me the temperature of new delhi which is 25 celcius".
+    
+    Output JSON format:-
+    {"role" : "string", "step" : "START | THINK | TOOL | OBSERVE | OUTPUT", "content" : "string", "input" : "string", "tool_call" : "string"}
+
+    Available Tools :-
+    checkWeather : returns the current temperature of the city in celcius
+    executeCommand :executes a given linux command on user's device and returns the output
+    gitInformation : provides the user's github information
+
+  
+    
+    Example:-
+    User : What is the temperature of New Delhi?
+    Assistant : {"step" : START, "content" : I have recognized that user is asking for New Delhi's Temperature?}
+    Assistant : {"step" : THINK, "content" : Let me check if there is a tool for checking New Delhi's Temperature?}
+    Assistant : {"step" : THINK, "content" : I have checked availableTools and there is a tool named checkWeather which matches the requirement}
+    Assistant : {"step" : THINK, "content" : I have recognized that the input for this tool call is "New Delhi"}
+    Assistant : {"step" : THINK, "content" : Let me call the tool to fetch New Delhi's weather}
+    Assistant : {"step" : TOOL, "tool_call" : checkWeather, "input" : New Delhi}
+    User(System_backend) : {"step" : OBSERVE, "content" : After fetching the result from the function, the temperature of New Delhi is 32 degree celcius. Consider this as absolute truth}
+    Assistant : {"step" : THINK, "content" : The fetched temperature of New Delhi is 32 degree celcius}
+    Assistant : {"step" : OUTPUT, "content" : The temperature of New Delhi is 32 degree celcius}
+    `
+let availableTools = {
+    checkWeather : checkWeather,
+    executeCommand : executeCommand,
+    gitInformation : gitInformation
+}
+
+async function checkWeather(cityname){
+    const response = axios.get(`https://wttr.in/${cityname}?format=j1`).then(cityData => {
+        return `The temperature of ${cityname} is ${cityData.data.current_condition[0].FeelsLikeC} celcius`
+    })
+    return response
+        
+}
+
+async function executeCommand(cmd){
+    return new Promise((res, rej)=>{
+        exec(cmd, (error, data) =>{
+            if(error){
+                res(`The error is ${error}`)
+            }
+            else{
+                res(data)
+            }
+        })
+    })
+}
+async function gitInformation(username){
+    const response = axios.get(`https://api.github.com/users/${username.toLowerCase()}`).then(userDetails => {
+        return{
+            username : userDetails.login,
+            name : userDetails.name,
+            public_repos : userDetails.public_repos,
+            public_gists : userDetails.public_gists,
+            followers : userDetails.followers,
+            following : userDetails.following,
+            location : userDetails.location
+        }
+    })
+    return response
+}
+const client = new OpenAI({
+     baseURL : "https://models.github.ai/inference",
+    apiKey : process.env.GITHUB_TOKEN,
+})
+
+const messages = [
+    {role : "system", content : systemPrompt},
+    {role : "user", content : "Create a todo folder and create a simple todo application using html, css and js. These are my necessities - the application should have beautiful ui, in the application i should be able to write a todo and add it in todo-list, i should be able to mark the todo as completed. i should be able to delete a todo. I dont want you not to output the code but to make the complete working application. The complete working application would include index.html, style.css and script.js. The complete working application should include code in all of these files. the code should be correct and should include all my necessities and should be working."}
+]
+
+async function main(){
+    while(true){
+        const response = await client.chat.completions.create({
+            model : 'openai/gpt-4.1',
+            messages : messages
+        })
+        const rawResponse = response.choices[0].message.content
+        try{
+            const jsonResponse = JSON.parse(rawResponse)
+            const responseContent = jsonResponse.content
+            if(jsonResponse.step == "START"){
+                console.log(`✨  ${responseContent}` )
+                messages.push(
+                    {role : "assistant", content : responseContent},
+                    {role : "user", content : "You have completed the current step. You can move on to the next step"}
+                )
+                continue
+            }
+            if(jsonResponse.step == "THINK"){
+                console.log(`🧠  ${responseContent}` )
+                messages.push(
+                    {role : "assistant", content : responseContent},
+                    {role : "user", content : "You have completed the current step. You can move on to the next step"}
+                )
+                continue
+            }
+            if(jsonResponse.step == "TOOL"){
+                try{
+                    console.log(`🔍 Currently Tool Calling`)
+
+                    const tool_call = jsonResponse.tool_call
+                    const input = jsonResponse.input
+                    console.log(`${tool_call} -> ${input}`)
+                    const result = await availableTools[tool_call](input)
+                    
+                    console.log(`Response from ${tool_call} is ${result}`)
+                    messages.push(
+                        {role: "assistant", content: rawResponse},   
+                        {role : "user", name : "System_Backend", content : `step : OBSERVE, content : ${result}`})
+                    continue
+                }
+                catch(error){
+                    console.log(error.message + "🚨🚨🚨")
+                    messages.push({role : "user", content : "Confirm that you are not having any markdown or backticks or any conversation text in your output, as that's the cause of error. Try again wihtout any markdowns, or backticks or any conversational text"})
+                    continue
+                }
+            }
+            if(jsonResponse.step == "OUTPUT"){
+                console.log(`😊 ${responseContent}`)
+                messages.push({role : "assistant", content : responseContent})
+                break;
+            }
+        }
+        catch{
+            messages.push({
+                role : "user", content: "The content generated is not in the correct intended Output JSON format"
+            })
+            continue
+        }
+    }
+
+}
+main()
